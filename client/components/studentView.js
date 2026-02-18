@@ -37,6 +37,7 @@ export function renderStudentView(user) {
     const optionsWrap = exerciseContainer.querySelector(".options");
     const feedback = exerciseContainer.querySelector("#feedback");
     const nextBtn = exerciseContainer.querySelector("#next");
+    let answered = false;
     nextBtn.disabled = true;
 
     exercise.options.forEach((option, index) => {
@@ -44,10 +45,21 @@ export function renderStudentView(user) {
       btn.className = "button secondary";
       btn.textContent = option;
       btn.addEventListener("click", async () => {
+        if (answered) {
+          return;
+        }
+
+        answered = true;
         const isCorrect = index === exercise.correctIndex;
         feedback.textContent = isCorrect ? "Верно!" : "Неправильно.";
         feedback.className = isCorrect ? "notice success" : "notice error";
+        btn.classList.add(isCorrect ? "answer-correct" : "answer-incorrect");
         nextBtn.disabled = false;
+
+        const allOptionButtons = optionsWrap.querySelectorAll("button");
+        allOptionButtons.forEach((item) => {
+          item.disabled = true;
+        });
 
         await api.saveResult(exercise.id, index, isCorrect);
       });
