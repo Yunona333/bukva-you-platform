@@ -62,8 +62,27 @@ async function getCurrentUser() {
   }
 }
 
-async function getExercises() {
-  return request("/api/exercises");
+async function getSectionsTree(includeInactive = false) {
+  const query = includeInactive ? "?include_inactive=1" : "";
+  return request(`/api/sections/tree${query}`);
+}
+
+async function getSections(parentId, includeInactive = false) {
+  const params = new URLSearchParams();
+  if (parentId == null) {
+    params.set("parent_id", "null");
+  } else {
+    params.set("parent_id", String(parentId));
+  }
+  if (includeInactive) {
+    params.set("include_inactive", "1");
+  }
+  return request(`/api/sections?${params.toString()}`);
+}
+
+async function getExercises(sectionId) {
+  const query = sectionId == null ? "" : `?section_id=${encodeURIComponent(sectionId)}`;
+  return request(`/api/exercises${query}`);
 }
 
 async function saveResult(exerciseId, answerIndex, isCorrect) {
@@ -91,6 +110,8 @@ export const api = {
   login,
   register,
   getCurrentUser,
+  getSections,
+  getSectionsTree,
   getExercises,
   saveResult,
   getResults,

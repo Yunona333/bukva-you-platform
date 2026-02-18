@@ -1,5 +1,17 @@
 import { api } from "./services.js";
 
+function flattenSections(nodes, depth = 0, result = []) {
+  nodes.forEach((node) => {
+    result.push({
+      id: node.id,
+      name: `${"  ".repeat(depth)}${node.name}`,
+      isActive: node.isActive
+    });
+    flattenSections(node.children || [], depth + 1, result);
+  });
+  return result;
+}
+
 export function renderTeacherView(user) {
   const wrapper = document.createElement("div");
   wrapper.innerHTML = `
@@ -9,12 +21,20 @@ export function renderTeacherView(user) {
     </div>
     <div class="card">
       <h3>Добавить упражнение</h3>
-      <input class="input" id="sentence" placeholder="Предложение с пропуском" />
-      <input class="input" id="opt1" placeholder="Вариант 1" />
-      <input class="input" id="opt2" placeholder="Вариант 2" />
-      <input class="input" id="opt3" placeholder="Вариант 3" />
-      <input class="input" id="opt4" placeholder="Вариант 4" />
-      <input class="input" id="correct" type="number" min="1" max="4" placeholder="Номер правильного варианта (1-4)" />
+      <select class="input" id="sectionSelect"></select>
+      <select class="input" id="exerciseType">
+        <option value="multiple_choice">multiple_choice</option>
+        <option value="text_input">text_input</option>
+        <option value="sentence_builder">sentence_builder</option>
+      </select>
+      <input class="input" id="sentence" placeholder="Текст упражнения" />
+      <div id="multipleChoiceFields">
+        <input class="input" id="opt1" placeholder="Вариант 1" />
+        <input class="input" id="opt2" placeholder="Вариант 2" />
+        <input class="input" id="opt3" placeholder="Вариант 3" />
+        <input class="input" id="opt4" placeholder="Вариант 4" />
+        <input class="input" id="correct" type="number" min="1" max="4" placeholder="Номер правильного варианта (1-4)" />
+      </div>
       <button class="button" id="add">Сохранить</button>
       <div id="addMessage"></div>
     </div>
@@ -24,14 +44,42 @@ export function renderTeacherView(user) {
     </div>
   `;
 
+  const sectionSelect = wrapper.querySelector("#sectionSelect");
+  const exerciseType = wrapper.querySelector("#exerciseType");
   const sentence = wrapper.querySelector("#sentence");
   const opt1 = wrapper.querySelector("#opt1");
   const opt2 = wrapper.querySelector("#opt2");
   const opt3 = wrapper.querySelector("#opt3");
   const opt4 = wrapper.querySelector("#opt4");
   const correct = wrapper.querySelector("#correct");
+  const multipleChoiceFields = wrapper.querySelector("#multipleChoiceFields");
   const addMessage = wrapper.querySelector("#addMessage");
   const resultsContainer = wrapper.querySelector("#results");
+
+  function renderSectionOptions(nodes) {
+    const flat = flattenSections(nodes);
+    if (flat.length === 0) {
+      sectionSelect.innerHTML = '<option value="">Разделы не найдены</option>';
+      return;
+    }
+
+    sectionSelect.innerHTML = flat
+      .map((item) => {
+        const suffix = item.isActive ? "" : " (off)";
+        return `<option value="${item.id}">${item.name}${suffix}</option>`;
+      })
+      .join("");
+  }
+
+  function toggleExerciseTypeFields() {
+    const isMultipleChoice = exerciseType.value === "multiple_choice";
+    multipleChoiceFields.style.display = isMultipleChoice ? "block" : "none";
+  }
+
+  async function loadSections() {
+    const tree = await api.getSectionsTree(true);
+    renderSectionOptions(tree);
+  }
 
   async function loadResults() {
     const results = await api.getResults();
@@ -68,31 +116,55 @@ export function renderTeacherView(user) {
     `;
   }
 
+  exerciseType.addEventListener("change", toggleExerciseTypeFields);
+
   wrapper.querySelector("#add").addEventListener("click", async () => {
     addMessage.textContent = "";
     addMessage.className = "";
 
-    const options = [opt1.value, opt2.value, opt3.value, opt4.value].map((v) => v.trim());
-    const correctIndex = Number.parseInt(correct.value, 10) - 1;
+    const selectedSectionId = Number.parseInt(sectionSelect.value, 10);
+    const selectedExerciseType = exerciseType.value;
 
-    if (!sentence.value.trim() || options.some((v) => !v)) {
-      addMessage.textContent = "Заполните все поля.";
+    if (Number.isNaN(selectedSectionId)) {
+      addMessage.textContent = "Выберите раздел.";
       addMessage.className = "notice error";
       return;
     }
 
-    if (Number.isNaN(correctIndex) || correctIndex < 0 || correctIndex > 3) {
-      addMessage.textContent = "Правильный ответ должен быть от 1 до 4.";
+    if (!sentence.value.trim()) {
+      addMessage.textContent = "Введите текст упражнения.";
       addMessage.className = "notice error";
       return;
+    }
+
+    const payload = {
+      sentence: sentence.value.trim(),
+      section_id: selectedSectionId,
+      exercise_type: selectedExerciseType
+    };
+
+    if (selectedExerciseType === "multiple_choice") {
+      const options = [opt1.value, opt2.value, opt3.value, opt4.value].map((v) => v.trim());
+      const correctIndex = Number.parseInt(correct.value, 10) - 1;
+
+      if (options.some((v) => !v)) {
+        addMessage.textContent = "Заполните все 4 варианта ответа.";
+        addMessage.className = "notice error";
+        return;
+      }
+
+      if (Number.isNaN(correctIndex) || correctIndex < 0 || correctIndex > 3) {
+        addMessage.textContent = "Правильный ответ должен быть от 1 до 4.";
+        addMessage.className = "notice error";
+        return;
+      }
+
+      payload.options = options;
+      payload.correctIndex = correctIndex;
     }
 
     try {
-      await api.addExercise({
-        sentence: sentence.value.trim(),
-        options,
-        correctIndex
-      });
+      await api.addExercise(payload);
 
       sentence.value = "";
       opt1.value = "";
@@ -109,6 +181,8 @@ export function renderTeacherView(user) {
     }
   });
 
+  toggleExerciseTypeFields();
+  loadSections();
   loadResults();
   return wrapper;
 }

@@ -9,6 +9,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || "dev_secret_change_me";
 const APP_BASE_URL = process.env.APP_BASE_URL || `http://localhost:${PORT}`;
+const SUPPORTED_EXERCISE_TYPES = new Set(["multiple_choice", "text_input", "sentence_builder"]);
 
 const RESERVED_NICKNAMES = new Set([
   "admin",
@@ -20,6 +21,42 @@ const RESERVED_NICKNAMES = new Set([
 ]);
 
 app.use(express.json());
+
+function dbGet(sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.get(sql, params, (err, row) => {
+      if (err) {
+        reject(err);
+        return;
+      }
+      resolve(row);
+    });
+  });
+}
+
+function dbAll(sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.all(sql, params, (err, rows) => {
+      if (err) {
+        reject(err);
+        return;
+      }
+      resolve(rows);
+    });
+  });
+}
+
+function dbRun(sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.run(sql, params, function onRun(err) {
+      if (err) {
+        reject(err);
+        return;
+      }
+      resolve(this);
+    });
+  });
+}
 
 function createToken(user) {
   return jwt.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: "7d" });
@@ -82,6 +119,57 @@ function validateNickname(nickname) {
 
 function generateVerificationToken() {
   return crypto.randomBytes(32).toString("base64url");
+}
+
+function parseOptionsJson(value) {
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (err) {
+    return [];
+  }
+}
+
+function buildSectionsTree(rows) {
+  const byId = new Map();
+  rows.forEach((row) => {
+    byId.set(row.id, {
+      id: row.id,
+      name: row.name,
+      parentId: row.parent_id,
+      orderIndex: row.order_index,
+      isActive: Boolean(row.is_active),
+      children: []
+    });
+  });
+
+  const roots = [];
+  byId.forEach((node) => {
+    if (node.parentId == null || !byId.has(node.parentId)) {
+      roots.push(node);
+      return;
+    }
+    byId.get(node.parentId).children.push(node);
+  });
+
+  const sortNodes = (nodes) => {
+    nodes.sort((a, b) => a.orderIndex - b.orderIndex || a.id - b.id);
+    nodes.forEach((node) => sortNodes(node.children));
+  };
+  sortNodes(roots);
+
+  return roots;
+}
+
+function parseNullableParentId(value) {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (value === null || value === "" || value === "null") {
+    return null;
+  }
+  const id = Number.parseInt(value, 10);
+  return Number.isNaN(id) ? undefined : id;
 }
 
 function renderVerificationPage(message) {
@@ -270,21 +358,234 @@ app.get("/api/auth/me", authRequired, (req, res) => {
   });
 });
 
-app.get("/api/exercises", authRequired, (req, res) => {
-  db.all("SELECT id, sentence, options_json, correct_index FROM exercises", (err, rows) => {
-    if (err) {
-      res.status(500).json({ error: "Database error" });
+app.get("/api/sections/tree", authRequired, async (req, res) => {
+  try {
+    const includeInactive = req.user.role === "teacher" && req.query.include_inactive === "1";
+    const rows = await dbAll(
+      `SELECT id, name, parent_id, order_index, is_active, created_at, updated_at
+       FROM sections
+       ${includeInactive ? "" : "WHERE is_active = 1"}
+       ORDER BY order_index, id`
+    );
+    res.json(buildSectionsTree(rows));
+  } catch (err) {
+    res.status(500).json({ error: "Database error" });
+  }
+});
+
+app.get("/api/sections", authRequired, async (req, res) => {
+  try {
+    const includeInactive = req.user.role === "teacher" && req.query.include_inactive === "1";
+    const parsedParentId = parseNullableParentId(req.query.parent_id);
+    if (parsedParentId === undefined && req.query.parent_id !== undefined) {
+      res.status(400).json({ error: "Invalid parent_id" });
       return;
     }
 
-    const data = rows.map((row) => ({
-      id: row.id,
-      sentence: row.sentence,
-      options: JSON.parse(row.options_json),
-      correctIndex: row.correct_index
-    }));
-    res.json(data);
-  });
+    const where = [];
+    const params = [];
+
+    if (!includeInactive) {
+      where.push("is_active = 1");
+    }
+
+    if (parsedParentId === undefined || parsedParentId === null) {
+      where.push("parent_id IS NULL");
+    } else {
+      where.push("parent_id = ?");
+      params.push(parsedParentId);
+    }
+
+    const rows = await dbAll(
+      `SELECT id, name, parent_id, order_index, is_active, created_at, updated_at
+       FROM sections
+       WHERE ${where.join(" AND ")}
+       ORDER BY order_index, id`,
+      params
+    );
+
+    res.json(
+      rows.map((row) => ({
+        id: row.id,
+        name: row.name,
+        parentId: row.parent_id,
+        orderIndex: row.order_index,
+        isActive: Boolean(row.is_active)
+      }))
+    );
+  } catch (err) {
+    res.status(500).json({ error: "Database error" });
+  }
+});
+
+app.post("/api/sections", authRequired, requireRole("teacher"), async (req, res) => {
+  try {
+    const name = String(req.body?.name || "").trim();
+    const parentId = parseNullableParentId(req.body?.parent_id);
+    const orderIndex = Number.parseInt(req.body?.order_index ?? 0, 10);
+    const isActive = req.body?.is_active === undefined ? 1 : req.body?.is_active ? 1 : 0;
+
+    if (!name) {
+      res.status(400).json({ error: "Section name is required" });
+      return;
+    }
+    if (parentId === undefined && req.body?.parent_id !== undefined) {
+      res.status(400).json({ error: "Invalid parent_id" });
+      return;
+    }
+
+    if (parentId !== null) {
+      const parent = await dbGet("SELECT id FROM sections WHERE id = ?", [parentId]);
+      if (!parent) {
+        res.status(400).json({ error: "Parent section not found" });
+        return;
+      }
+    }
+
+    const now = new Date().toISOString();
+    const insert = await dbRun(
+      "INSERT INTO sections (name, parent_id, order_index, is_active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+      [name, parentId ?? null, Number.isNaN(orderIndex) ? 0 : orderIndex, isActive, now, now]
+    );
+
+    res.json({ id: insert.lastID });
+  } catch (err) {
+    res.status(500).json({ error: "Database error" });
+  }
+});
+
+app.patch("/api/sections/:id", authRequired, requireRole("teacher"), async (req, res) => {
+  try {
+    const sectionId = Number.parseInt(req.params.id, 10);
+    if (Number.isNaN(sectionId)) {
+      res.status(400).json({ error: "Invalid section id" });
+      return;
+    }
+
+    const existing = await dbGet("SELECT id FROM sections WHERE id = ?", [sectionId]);
+    if (!existing) {
+      res.status(404).json({ error: "Section not found" });
+      return;
+    }
+
+    const updates = [];
+    const params = [];
+
+    if (req.body?.name !== undefined) {
+      const name = String(req.body.name).trim();
+      if (!name) {
+        res.status(400).json({ error: "Section name cannot be empty" });
+        return;
+      }
+      updates.push("name = ?");
+      params.push(name);
+    }
+
+    if (req.body?.parent_id !== undefined) {
+      const parentId = parseNullableParentId(req.body.parent_id);
+      if (parentId === undefined) {
+        res.status(400).json({ error: "Invalid parent_id" });
+        return;
+      }
+      if (parentId === sectionId) {
+        res.status(400).json({ error: "Section cannot be parent of itself" });
+        return;
+      }
+      if (parentId !== null) {
+        const parent = await dbGet("SELECT id FROM sections WHERE id = ?", [parentId]);
+        if (!parent) {
+          res.status(400).json({ error: "Parent section not found" });
+          return;
+        }
+      }
+      updates.push("parent_id = ?");
+      params.push(parentId);
+    }
+
+    if (req.body?.order_index !== undefined) {
+      const orderIndex = Number.parseInt(req.body.order_index, 10);
+      if (Number.isNaN(orderIndex)) {
+        res.status(400).json({ error: "Invalid order_index" });
+        return;
+      }
+      updates.push("order_index = ?");
+      params.push(orderIndex);
+    }
+
+    if (req.body?.is_active !== undefined) {
+      updates.push("is_active = ?");
+      params.push(req.body.is_active ? 1 : 0);
+    }
+
+    if (updates.length === 0) {
+      res.status(400).json({ error: "No fields to update" });
+      return;
+    }
+
+    updates.push("updated_at = ?");
+    params.push(new Date().toISOString());
+    params.push(sectionId);
+
+    await dbRun(`UPDATE sections SET ${updates.join(", ")} WHERE id = ?`, params);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: "Database error" });
+  }
+});
+
+app.delete("/api/sections/:id", authRequired, requireRole("teacher"), async (req, res) => {
+  try {
+    const sectionId = Number.parseInt(req.params.id, 10);
+    if (Number.isNaN(sectionId)) {
+      res.status(400).json({ error: "Invalid section id" });
+      return;
+    }
+
+    const result = await dbRun(
+      "UPDATE sections SET is_active = 0, updated_at = ? WHERE id = ?",
+      [new Date().toISOString(), sectionId]
+    );
+
+    if (result.changes === 0) {
+      res.status(404).json({ error: "Section not found" });
+      return;
+    }
+
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: "Database error" });
+  }
+});
+
+app.get("/api/exercises", authRequired, async (req, res) => {
+  try {
+    const sectionId = req.query.section_id ? Number.parseInt(req.query.section_id, 10) : null;
+    if (req.query.section_id && Number.isNaN(sectionId)) {
+      res.status(400).json({ error: "Invalid section_id" });
+      return;
+    }
+
+    const rows = await dbAll(
+      `SELECT id, sentence, options_json, correct_index, section_id, exercise_type
+       FROM exercises
+       ${sectionId == null ? "" : "WHERE section_id = ?"}
+       ORDER BY id`,
+      sectionId == null ? [] : [sectionId]
+    );
+
+    res.json(
+      rows.map((row) => ({
+        id: row.id,
+        sentence: row.sentence,
+        options: parseOptionsJson(row.options_json),
+        correctIndex: row.correct_index,
+        sectionId: row.section_id,
+        exerciseType: row.exercise_type
+      }))
+    );
+  } catch (err) {
+    res.status(500).json({ error: "Database error" });
+  }
 });
 
 app.post("/api/results", authRequired, requireRole("student"), (req, res) => {
@@ -327,24 +628,54 @@ app.get("/api/results", authRequired, requireRole("teacher"), (req, res) => {
   });
 });
 
-app.post("/api/exercises", authRequired, requireRole("teacher"), (req, res) => {
-  const { sentence, options, correctIndex } = req.body || {};
-  if (!sentence || !Array.isArray(options) || options.length !== 4 || correctIndex == null) {
-    res.status(400).json({ error: "Invalid exercise format" });
-    return;
-  }
+app.post("/api/exercises", authRequired, requireRole("teacher"), async (req, res) => {
+  try {
+    const sentence = String(req.body?.sentence || "").trim();
+    const sectionId = Number.parseInt(req.body?.section_id ?? req.body?.sectionId, 10);
+    const exerciseType = String(req.body?.exercise_type || req.body?.exerciseType || "").trim();
 
-  db.run(
-    "INSERT INTO exercises (sentence, options_json, correct_index) VALUES (?, ?, ?)",
-    [sentence, JSON.stringify(options), correctIndex],
-    function (err) {
-      if (err) {
-        res.status(500).json({ error: "Database error" });
+    if (!sentence || Number.isNaN(sectionId) || !exerciseType) {
+      res.status(400).json({ error: "section_id, exercise_type and sentence are required" });
+      return;
+    }
+
+    if (!SUPPORTED_EXERCISE_TYPES.has(exerciseType)) {
+      res.status(400).json({ error: "Unsupported exercise_type" });
+      return;
+    }
+
+    const section = await dbGet("SELECT id FROM sections WHERE id = ?", [sectionId]);
+    if (!section) {
+      res.status(400).json({ error: "Section not found" });
+      return;
+    }
+
+    let options = Array.isArray(req.body?.options) ? req.body.options : [];
+    let correctIndex = Number.parseInt(req.body?.correctIndex, 10);
+
+    if (exerciseType === "multiple_choice") {
+      if (!Array.isArray(options) || options.length !== 4 || options.some((item) => !String(item).trim())) {
+        res.status(400).json({ error: "Multiple choice requires 4 options" });
         return;
       }
-      res.json({ id: this.lastID });
+      if (Number.isNaN(correctIndex) || correctIndex < 0 || correctIndex > 3) {
+        res.status(400).json({ error: "Invalid correctIndex for multiple_choice" });
+        return;
+      }
+    } else {
+      options = [];
+      correctIndex = -1;
     }
-  );
+
+    const insert = await dbRun(
+      "INSERT INTO exercises (sentence, options_json, correct_index, section_id, exercise_type) VALUES (?, ?, ?, ?, ?)",
+      [sentence, JSON.stringify(options), correctIndex, sectionId, exerciseType]
+    );
+
+    res.json({ id: insert.lastID });
+  } catch (err) {
+    res.status(500).json({ error: "Database error" });
+  }
 });
 
 app.use(express.static(path.join(process.cwd(), "client")));
