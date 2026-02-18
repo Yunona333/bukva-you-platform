@@ -58,12 +58,12 @@ h1 {
 
 .button.answer-correct {
   background: #d8f2e1;
-  color: #1f5131;
+  color: #2b2b2b;
 }
 
 .button.answer-incorrect {
   background: #f9d7d7;
-  color: #6a2525;
+  color: #2b2b2b;
 }
 
 .button:disabled {
