@@ -66,6 +66,18 @@ h1 {
   color: #2b2b2b;
 }
 
+.button.answer-correct:disabled {
+  background: #d8f2e1;
+  color: #2b2b2b;
+  opacity: 1;
+}
+
+.button.answer-incorrect:disabled {
+  background: #f9d7d7;
+  color: #2b2b2b;
+  opacity: 1;
+}
+
 .button:disabled {
   opacity: 0.6;
   cursor: not-allowed;
