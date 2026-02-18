@@ -4,7 +4,7 @@ export function renderTeacherView(user) {
   const wrapper = document.createElement("div");
   wrapper.innerHTML = `
     <div class="card">
-      <h2>Привет, ${user.email}</h2>
+      <h2>Hi, ${user.nickname || user.email}! Let's do some English practice 🙂</h2>
       <p class="tag">Роль: преподаватель</p>
     </div>
     <div class="card">
