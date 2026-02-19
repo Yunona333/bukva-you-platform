@@ -86,10 +86,37 @@ async function ensureSection(name, parentId, orderIndex) {
   return insert.lastID;
 }
 
+async function ensureExercise(sectionId, exercise) {
+  const existing = await get(
+    "SELECT id FROM exercises WHERE section_id = ? AND sentence = ? LIMIT 1",
+    [sectionId, exercise.sentence]
+  );
+  if (existing) {
+    await run(
+      "UPDATE exercises SET options_json = ?, correct_index = ?, exercise_type = 'multiple_choice' WHERE id = ?",
+      [JSON.stringify(exercise.options), exercise.correctIndex, existing.id]
+    );
+    return existing.id;
+  }
+
+  const insert = await run(
+    "INSERT INTO exercises (sentence, options_json, correct_index, section_id, exercise_type) VALUES (?, ?, ?, ?, ?)",
+    [
+      exercise.sentence,
+      JSON.stringify(exercise.options),
+      exercise.correctIndex,
+      sectionId,
+      "multiple_choice"
+    ]
+  );
+  return insert.lastID;
+}
+
 async function seedSections() {
   const grammarId = await ensureSection("Grammar", null, 0);
   await ensureSection("Vocabulary", null, 1);
   await ensureSection("Listening", null, 2);
+  const checkYourLevelId = await ensureSection("Check your level", null, 3);
 
   const presentTensesId = await ensureSection("Present Tenses", grammarId, 0);
   await ensureSection("Past Tenses", grammarId, 1);
@@ -101,7 +128,13 @@ async function seedSections() {
   await ensureSection("Present Simple and Progressive", presentTensesId, 1);
   await ensureSection("Present Perfect", presentTensesId, 2);
 
-  return presentSimpleId;
+  const a1a2Id = await ensureSection("A1-A2", checkYourLevelId, 0);
+  const a1a2PlacementId = await ensureSection("A1-A2 Placement Test", a1a2Id, 0);
+
+  return {
+    presentSimpleId,
+    a1a2PlacementId
+  };
 }
 
 async function seedUsers() {
@@ -148,6 +181,115 @@ async function migrateExercises(defaultSectionId) {
   await run(
     "UPDATE exercises SET exercise_type = 'multiple_choice' WHERE exercise_type IS NULL OR exercise_type = ''"
   );
+}
+
+async function seedA1A2PlacementExercises(sectionId) {
+  const exercises = [
+    {
+      sentence: "My name ______ Anna. I ______ from Italy.",
+      options: ["are / is", "is / am", "am / is", "is / are"],
+      correctIndex: 1
+    },
+    {
+      sentence: "We have ______ nice house. ______ house is in London.",
+      options: ["a / The", "an / The", "the / A", "a / A"],
+      correctIndex: 0
+    },
+    {
+      sentence: "______ any children in the park yesterday?",
+      options: ["Was there", "There were", "Were there", "There was"],
+      correctIndex: 2
+    },
+    {
+      sentence: "She ______ to work by car, but usually she ______ the bus.",
+      options: ["go / take", "goes / takes", "is going / is taking", "went / took"],
+      correctIndex: 1
+    },
+    {
+      sentence: "I'm hungry! I want ______ a sandwich.",
+      options: ["eat", "eating", "to eat", "eats"],
+      correctIndex: 2
+    },
+    {
+      sentence: "Listen! My little sister ______ in her room.",
+      options: ["sings", "is singing", "sing", "sang"],
+      correctIndex: 1
+    },
+    {
+      sentence: "My father is ______ engineer. He works very hard.",
+      options: ["a", "an", "the", "-"],
+      correctIndex: 1
+    },
+    {
+      sentence: "______ you like to play tennis with me? - Sorry, I can't. I'm busy.",
+      options: ["Does", "Are", "Would", "Do"],
+      correctIndex: 2
+    },
+    {
+      sentence: "This bag isn't ______ . It's ______ .",
+      options: ["my / her", "mine / hers", "mine / her", "my / hers"],
+      correctIndex: 1
+    },
+    {
+      sentence: "I was very tired, so I went ______ bed early.",
+      options: ["at", "in", "to", "into"],
+      correctIndex: 2
+    },
+    {
+      sentence: "Tom ______ his leg last weekend when he played football.",
+      options: ["break", "breaks", "broke", "broken"],
+      correctIndex: 2
+    },
+    {
+      sentence: "______ water is there in the bottle? - Only a little.",
+      options: ["How many", "How much", "What", "Which"],
+      correctIndex: 1
+    },
+    {
+      sentence: "It's very hot in this room. ______ open the window, please?",
+      options: ["Do you", "Can you", "Are you", "Have you"],
+      correctIndex: 1
+    },
+    {
+      sentence: "London is a big city, but Tokyo is ______ .",
+      options: ["bigger", "the bigger", "more big", "the biggest"],
+      correctIndex: 0
+    },
+    {
+      sentence: "If it ______ tomorrow, we will stay at home.",
+      options: ["rain", "raining", "will rain", "rains"],
+      correctIndex: 3
+    },
+    {
+      sentence: "My brother is a musician. ______ plays the guitar very well.",
+      options: ["He", "Him", "His", "Her"],
+      correctIndex: 0
+    },
+    {
+      sentence: "We usually ______ early on weekdays because we have to go to school.",
+      options: ["get up", "gets up", "are getting up", "got up"],
+      correctIndex: 0
+    },
+    {
+      sentence: "You look tired. You ______ work so hard. You should rest.",
+      options: ["don't must", "mustn't", "don't have to", "can't"],
+      correctIndex: 1
+    },
+    {
+      sentence: "Look at ______ clouds! It's going to rain soon.",
+      options: ["this", "that", "these", "it"],
+      correctIndex: 2
+    },
+    {
+      sentence: "Whose phone is this? - It's my ______ phone.",
+      options: ["parent", "parents", "parents's", "parents'"],
+      correctIndex: 3
+    }
+  ];
+
+  for (const exercise of exercises) {
+    await ensureExercise(sectionId, exercise);
+  }
 }
 
 export function initDb() {
@@ -228,9 +370,10 @@ export function initDb() {
           await run("CREATE INDEX IF NOT EXISTS idx_exercises_section_id ON exercises(section_id)");
 
           await seedUsers();
-          const presentSimpleSectionId = await seedSections();
-          await seedExercises(presentSimpleSectionId);
-          await migrateExercises(presentSimpleSectionId);
+          const sectionIds = await seedSections();
+          await seedExercises(sectionIds.presentSimpleId);
+          await migrateExercises(sectionIds.presentSimpleId);
+          await seedA1A2PlacementExercises(sectionIds.a1a2PlacementId);
 
           resolve();
         } catch (err) {
